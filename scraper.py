@@ -5,15 +5,14 @@ from urllib.parse import quote_plus
 from typing import List, Dict, Any
 
 from playwright.async_api import async_playwright, Page
-import google.generativeai as genai
+from google import genai
 
-# Gemini API Yapılandırması
+# Yeni Google GenAI API Yapılandırması
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    client = genai.Client(api_key=GEMINI_API_KEY)
 else:
-    model = None
+    client = None
 
 SEARCH_TERMS = [
     "FinTech internship",
@@ -21,22 +20,27 @@ SEARCH_TERMS = [
     "Data Analytics internship",
     "Data Analyst internship",
     "Business Analyst internship",
+    "Compliance Intern",
+    "Risk Management Intern",
+    "Financial Crime Compliance (FCC) Intern",
+    "Investment Research Working Student",
+    "Strategy Intern",
+    "Corporate Finance Working Student",
+    "Business Development Intern",
 ]
 
 def build_linkedin_jobs_url(term: str, location: str = "Switzerland") -> str:
-    # Herkese açık (Login gerektirmeyen) İsviçre LinkedIn iş arama URL'i
     keyword = quote_plus(term)
     loc = quote_plus(location)
     return f"https://ch.linkedin.com/jobs/search?keywords={keyword}&location={loc}&f_TPR=r2592000"
 
 async def scroll_jobs_page(page: Page, rounds: int = 5) -> None:
-    # Sayfayı yavaşça aşağı kaydırarak dinamik ilanların yüklenmesini sağlar
     for _ in range(rounds):
         await page.mouse.wheel(0, 1000)
         await page.wait_for_timeout(1000)
 
 async def evaluate_job_with_gemini(title: str, company: str) -> str:
-    if not model:
+    if not client:
         return "Değerlendirme kapalı (API Key yok)"
         
     prompt = f"""
@@ -51,17 +55,20 @@ async def evaluate_job_with_gemini(title: str, company: str) -> str:
     Format: [Puan]/10 - [Sebep]
     """
     try:
-        response = await model.generate_content_async(prompt)
+        # YENİ KÜTÜPHANE ÇAĞRISI BURASI
+        response = client.models.generate_content(
+            model='gemini-1.5-flash',
+            contents=prompt
+        )
         return response.text.strip()
     except Exception as e:
         return f"Hata: {e}"
 
 async def extract_jobs(page: Page) -> List[Dict[str, Any]]:
     jobs = []
-    # Herkese açık sayfanın doğru CSS seçicileri
     cards = await page.query_selector_all(".base-card")
     
-    for card in cards[:10]: # Her terim için çok fazla API harcamamak adına ilk 10'u alıyoruz
+    for card in cards[:10]: 
         try:
             title_el = await card.query_selector(".base-search-card__title")
             title = await title_el.inner_text() if title_el else ""
@@ -76,7 +83,7 @@ async def extract_jobs(page: Page) -> List[Dict[str, Any]]:
             link = await link_el.get_attribute("href") if link_el else ""
             
             if link and "?" in link:
-                link = link.split("?")[0] # URL'deki gereksiz takip parametrelerini temizle
+                link = link.split("?")[0] 
 
             if title.strip():
                 jobs.append({
@@ -110,7 +117,6 @@ async def main():
         
         print("Bot çalıştırılıyor. İlanlar taranıyor...\n")
         
-        # RAM'i zorlamamak için asyncio.gather yerine sırayla (sequential) geziyoruz
         for term in SEARCH_TERMS:
             print(f"Aranıyor: {term}")
             await page.goto(build_linkedin_jobs_url(term), wait_until="domcontentloaded")
@@ -126,7 +132,6 @@ async def main():
     print(f"\nToplam {len(unique_jobs)} benzersiz ilan bulundu. Gemini analiz ediyor...\n")
     print("-" * 50)
     
-    # İlanları Gemini'a gönderip değerlendiriyoruz
     final_results = []
     for job in unique_jobs:
         score = await evaluate_job_with_gemini(job['title'], job['company'])
@@ -137,10 +142,8 @@ async def main():
         print(f"Değerlendirme: {score}")
         print("-" * 50)
         
-    # Sonuçları json olarak kaydet (İleride veritabanı veya telegram botu için kullanılacak)
     with open("jobs_output.json", "w", encoding="utf-8") as f:
         json.dump(final_results, f, ensure_ascii=False, indent=2)
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
