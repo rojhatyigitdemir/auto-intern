@@ -29,7 +29,6 @@ SEARCH_TERMS = [
     "Business Development Intern",
 ]
 
-# HAFIZA DOSYASI AYARLARI
 SEEN_JOBS_FILE = "seen_jobs.json"
 
 def load_seen_jobs() -> set:
@@ -77,26 +76,24 @@ async def evaluate_job_with_gemini(title: str, company: str) -> str:
         return "Değerlendirme kapalı (API Key yok)"
         
     prompt = f"""
-    Sen kıdemli bir İK asistanısın. Aday profili: İsviçre'de yaşayan, Hukuk geçmişine sahip,Türkiye'de avukatlık yapmış,
+    Sen kıdemli bir İK asistanısın. Aday profili: İsviçre'de yaşayan, Hukuk geçmişine sahip, 
     LUMACSS (Computational Social Sciences) yüksek lisansı yapan, FinTech, LegalTech ve Veri Analizi 
     (Python, R, SQL) alanlarında yetkin bir araştırmacı ve stajyer adayı.
     
-    Dil Yetkinlikleri: Türkçe (Anadil), İngilizce (Akıcı), Almanca (B2 - Orta).
-    
-    Ekstra Filtreleme Kuralı: 
-    1. İngilizce ve Türkçe dillerinin avantaj sağlayacağı, uluslararası profil arayan ilanlara öncelik (yüksek puan) ver.
-    2. B2 Almanca seviyesinin yeterli olabileceği (veya hiç Almanca gerektirmeyen) ilanları kabul et ve yüksek puan ver.
-    3. Ancak ilan başlığından veya şirketin yapısından anadili veya C1/C2 seviyesinde kusursuz Almanca arandığı aşikarsa, puanı düşür (1-5 arası).
+    KATI ELEME KURALLARI (BU KURALLARA UYMAYAN İLANLARA KESİNLİKLE 1-4 ARASI PUAN VER):
+    1. DİL KURALI: İlan başlığı veya yapısı Almanca olan işleri (örneğin 'Mitarbeiter/in', 'Rechtsanwältin', 'Fachmitarbeiter' vb.) KESİNLİKLE REDDET. Sadece İngilizce (veya uluslararası) profil arayanlara yüksek puan ver.
+    2. ÇALIŞMA ORANI KURALI: Normal/Standart tam zamanlı (%100) işleri KESİNLİKLE REDDET. SADECE yarı zamanlı (örneğin %60-%80) pozisyonları VEYA başlığında açıkça "Intern", "Internship", "Trainee", "Working Student", "Praktikum" yazan %100 staj/öğrenci pozisyonlarını kabul et.
     
     İlan Başlığı: {title}
     Şirket: {company}
     
-    Bu ilan adayın profiline uygun mu? Sadece 1 ile 10 arası bir puan ver ve tek cümlelik somut bir sebep yaz.
+    Bu ilan adayın profiline uygun mu? Yukarıdaki kurallara göre sadece 1 ile 10 arası bir puan ver ve tek cümlelik somut bir sebep yaz.
     Format: [Puan]/10 - [Sebep]
     """
     try:
+        # En güncel ve hatasız çalışan modeli kullanıyoruz
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.0-flash',
             contents=prompt
         )
         return response.text.strip()
@@ -169,7 +166,6 @@ async def main():
         
     unique_jobs = dedupe_jobs(all_jobs)
     
-    # HAFIZAYI YÜKLE
     seen_jobs = load_seen_jobs()
     new_jobs_found = False
     
@@ -178,14 +174,11 @@ async def main():
     
     final_results = []
     for job in unique_jobs:
-        # İlanı hafıza için benzersiz bir ID ile etiketle
         job_id = f"{job['title']} | {job['company']}"
         
-        # Eğer bu ilanı daha önce gördüysek, pas geç
         if job_id in seen_jobs:
             continue
             
-        # Sadece yeni ilanları Gemini'ye gönder
         score_text = await evaluate_job_with_gemini(job['title'], job['company'])
         job['ai_score'] = score_text
         final_results.append(job)
@@ -194,7 +187,6 @@ async def main():
         print(f"Değerlendirme: {score_text}")
         print("-" * 50)
         
-        # 7 ve üzeri puan alanları Telegram'a at
         if any(f"{i}/10" in score_text for i in [7, 8, 9, 10]):
             msg = f"🚀 <b>Yeni Uygun Staj Bulundu!</b>\n\n"
             msg += f"📌 <b>Pozisyon:</b> {job['title']}\n"
@@ -205,11 +197,9 @@ async def main():
             
             send_telegram_message(msg)
             
-        # İlanı hafızaya ekle
         seen_jobs.add(job_id)
         new_jobs_found = True
         
-    # Eğer yeni ilan bulduysak, hafıza dosyasını güncelle
     if new_jobs_found:
         save_seen_jobs(seen_jobs)
         print("\nHafıza güncellendi!")
