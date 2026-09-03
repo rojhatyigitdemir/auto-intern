@@ -1,13 +1,13 @@
 import asyncio
 import json
 import os
+import requests
 from urllib.parse import quote_plus
 from typing import List, Dict, Any
 
 from playwright.async_api import async_playwright, Page
 from google import genai
 
-# Yeni Google GenAI API Yapılandırması
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -29,6 +29,22 @@ SEARCH_TERMS = [
     "Business Development Intern",
 ]
 
+# HAFIZA DOSYASI AYARLARI
+SEEN_JOBS_FILE = "seen_jobs.json"
+
+def load_seen_jobs() -> set:
+    if os.path.exists(SEEN_JOBS_FILE):
+        try:
+            with open(SEEN_JOBS_FILE, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+    return set()
+
+def save_seen_jobs(seen_jobs: set):
+    with open(SEEN_JOBS_FILE, "w", encoding="utf-8") as f:
+        json.dump(list(seen_jobs), f, ensure_ascii=False, indent=2)
+
 def build_linkedin_jobs_url(term: str, location: str = "Switzerland") -> str:
     keyword = quote_plus(term)
     loc = quote_plus(location)
@@ -39,14 +55,38 @@ async def scroll_jobs_page(page: Page, rounds: int = 5) -> None:
         await page.mouse.wheel(0, 1000)
         await page.wait_for_timeout(1000)
 
+def send_telegram_message(message: str):
+    token = os.getenv("TELEGRAM_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        return
+        
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"Telegram hatası: {e}")
+
 async def evaluate_job_with_gemini(title: str, company: str) -> str:
     if not client:
         return "Değerlendirme kapalı (API Key yok)"
         
     prompt = f"""
-    Sen kıdemli bir İK asistanısın. Aday profili: İsviçre'de yaşayan, Hukuk geçmişine sahip, 
+    Sen kıdemli bir İK asistanısın. Aday profili: İsviçre'de yaşayan, Hukuk geçmişine sahip,Türkiye'de avukatlık yapmış,
     LUMACSS (Computational Social Sciences) yüksek lisansı yapan, FinTech, LegalTech ve Veri Analizi 
     (Python, R, SQL) alanlarında yetkin bir araştırmacı ve stajyer adayı.
+    
+    Dil Yetkinlikleri: Türkçe (Anadil), İngilizce (Akıcı), Almanca (B2 - Orta).
+    
+    Ekstra Filtreleme Kuralı: 
+    1. İngilizce ve Türkçe dillerinin avantaj sağlayacağı, uluslararası profil arayan ilanlara öncelik (yüksek puan) ver.
+    2. B2 Almanca seviyesinin yeterli olabileceği (veya hiç Almanca gerektirmeyen) ilanları kabul et ve yüksek puan ver.
+    3. Ancak ilan başlığından veya şirketin yapısından anadili veya C1/C2 seviyesinde kusursuz Almanca arandığı aşikarsa, puanı düşür (1-5 arası).
     
     İlan Başlığı: {title}
     Şirket: {company}
@@ -55,7 +95,6 @@ async def evaluate_job_with_gemini(title: str, company: str) -> str:
     Format: [Puan]/10 - [Sebep]
     """
     try:
-        # YENİ KÜTÜPHANE ÇAĞRISI BURASI
         response = client.models.generate_content(
             model='gemini-1.5-flash',
             contents=prompt
@@ -129,21 +168,53 @@ async def main():
         await browser.close()
         
     unique_jobs = dedupe_jobs(all_jobs)
-    print(f"\nToplam {len(unique_jobs)} benzersiz ilan bulundu. Gemini analiz ediyor...\n")
+    
+    # HAFIZAYI YÜKLE
+    seen_jobs = load_seen_jobs()
+    new_jobs_found = False
+    
+    print(f"\nToplam {len(unique_jobs)} ilan bulundu. Hafıza kontrol ediliyor...\n")
     print("-" * 50)
     
     final_results = []
     for job in unique_jobs:
-        score = await evaluate_job_with_gemini(job['title'], job['company'])
-        job['ai_score'] = score
+        # İlanı hafıza için benzersiz bir ID ile etiketle
+        job_id = f"{job['title']} | {job['company']}"
+        
+        # Eğer bu ilanı daha önce gördüysek, pas geç
+        if job_id in seen_jobs:
+            continue
+            
+        # Sadece yeni ilanları Gemini'ye gönder
+        score_text = await evaluate_job_with_gemini(job['title'], job['company'])
+        job['ai_score'] = score_text
         final_results.append(job)
         
-        print(f"Pozisyon: {job['title']} | Şirket: {job['company']}")
-        print(f"Değerlendirme: {score}")
+        print(f"YENİ İLAN! Pozisyon: {job['title']} | Şirket: {job['company']}")
+        print(f"Değerlendirme: {score_text}")
         print("-" * 50)
         
-    with open("jobs_output.json", "w", encoding="utf-8") as f:
-        json.dump(final_results, f, ensure_ascii=False, indent=2)
+        # 7 ve üzeri puan alanları Telegram'a at
+        if any(f"{i}/10" in score_text for i in [7, 8, 9, 10]):
+            msg = f"🚀 <b>Yeni Uygun Staj Bulundu!</b>\n\n"
+            msg += f"📌 <b>Pozisyon:</b> {job['title']}\n"
+            msg += f"🏢 <b>Şirket:</b> {job['company']}\n"
+            msg += f"📍 <b>Konum:</b> {job['location']}\n\n"
+            msg += f"🤖 <b>Yapay Zeka Yorumu:</b> {score_text}\n\n"
+            msg += f"🔗 <a href='{job['link']}'>İlana Git</a>"
+            
+            send_telegram_message(msg)
+            
+        # İlanı hafızaya ekle
+        seen_jobs.add(job_id)
+        new_jobs_found = True
+        
+    # Eğer yeni ilan bulduysak, hafıza dosyasını güncelle
+    if new_jobs_found:
+        save_seen_jobs(seen_jobs)
+        print("\nHafıza güncellendi!")
+    else:
+        print("\nYeni bir ilan bulunamadı.")
 
 if __name__ == "__main__":
     asyncio.run(main())
